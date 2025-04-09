@@ -30,7 +30,7 @@ class SwiGLU(nn.Module):
 # -----------------------------
 # Attention with GQA + RoPE
 # -----------------------------
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttentionOld(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -47,28 +47,124 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
         self.rope_freqs = build_rope_cache(config.block_size, self.head_dim, device=config.device)
 
-    def forward(self, x):
-        B, T, C = x.size() # B =1, T = 13, C = 384
+    def forward(self, x, rope_freqs=None, attention_mask=None):
+        """
+        Args:
+            x: input tensor of shape (batch_size, seq_len, n_embd)
+            attention_mask: optional mask of shape (batch_size, seq_len)
+                           where 1 = keep token, 0 = mask out (e.g., for [PAD] tokens)
+        """
+        B, T, C = x.size()
+        
+        # Projections
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
 
-        freqs = self.rope_freqs[:, :T, :, :].to(x.device)# torch.Size([1, 1, 512, 48])
-        #q.shape torch.Size([1, 8, 13, 48])
-        q = apply_rope(q, freqs)
-        k = apply_rope(k, freqs)
+        # Apply RoPE
+        if rope_freqs is not None:
+            q = apply_rope(q, rope_freqs)
+            k = apply_rope(k, rope_freqs)
 
+        # Grouped Query Attention
         if self.n_head != self.n_kv_head:
-            # repeat keys and values across heads
             k = k.repeat(1, self.n_head // self.n_kv_head, 1, 1)
             v = v.repeat(1, self.n_head // self.n_kv_head, 1, 1)
 
-        att = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        att = torch.tril(torch.ones(T, T, device=x.device)).unsqueeze(0).unsqueeze(0) * att
+        # Attention scores
+        att = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Masking
+        if attention_mask is not None:
+            # Combine causal mask with padding mask
+            causal_mask = torch.tril(torch.ones(T, T, dtype=torch.bool, device=x.device))
+            padding_mask = attention_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, T)
+            combined_mask = causal_mask & (padding_mask != 0)
+            att = att.masked_fill(~combined_mask, float('-inf'))
+        else:
+            # Default causal mask
+            att = att.masked_fill(torch.tril(torch.ones(T, T, device=x.device)) == 0, float('-inf'))
+
+        # Softmax and output
         att = F.softmax(att, dim=-1)
         att = self.dropout(att)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        return self.out_proj(out)
 
-        out = torch.matmul(att, v).transpose(1, 2).contiguous().view(B, T, C)
+class MultiHeadAttention(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        
+        # Ensure embedding dimension is divisible by number of heads
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+        
+        # Attention parameters
+        self.n_head = config.n_head
+        self.n_kv_head = config.n_kv_head if hasattr(config, 'n_kv_head') else config.n_head
+        self.head_dim = config.n_embd // config.n_head
+        self.scale = self.head_dim ** -0.5
+        
+        # Projection layers
+        self.q_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.out_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
+        
+        # Regularization
+        self.dropout = nn.Dropout(config.dropout)
+        
+        # Positional embeddings (optional)
+        self.use_rope = getattr(config, 'use_rope', True)
+        if self.use_rope:
+            self.rope_freqs = build_rope_cache(
+                config.block_size,
+                self.head_dim,
+                device=config.device
+            )
+
+    def forward(self, x, attention_mask=None, use_cache=False, cache_position=0):
+        B, T, C = x.size()
+        
+        # Project queries, keys, values
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
+
+        # Apply rotary positional embeddings if enabled
+        if self.use_rope:
+            rope_freqs = self.rope_freqs[:T]  # Use only frequencies up to sequence length
+            q = apply_rope(q, rope_freqs)
+            k = apply_rope(k, rope_freqs)
+
+        # Handle grouped query attention
+        if self.n_head != self.n_kv_head:
+            k = k.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+            v = v.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+
+        # Attention scores
+        att = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Masking logic
+        if attention_mask is not None:
+            # Create causal mask
+            causal_mask = torch.ones(T, T, dtype=torch.bool, device=x.device).tril()
+            
+            # Combine with padding mask
+            padding_mask = attention_mask.view(B, 1, 1, T)
+            combined_mask = causal_mask & padding_mask
+            
+            # Apply mask
+            att = att.masked_fill(~combined_mask, float('-inf'))
+        else:
+            # Default causal mask
+            att = att.masked_fill(~torch.ones(T, T, device=x.device).tril(), float('-inf'))
+
+        # Softmax and attention output
+        att = F.softmax(att, dim=-1)
+        att = self.dropout(att)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
+        
         return self.out_proj(out)
 
 # -----------------------------
@@ -91,9 +187,10 @@ class TransformerBlock(nn.Module):
         # Layer normalization before the MLP layer
         self.ln2 = RMSNorm(config.n_embd)
         # MLP with SwiGLU activation
-        self.mlp = SwiGLU(config.n_embd, 4 * config.n_embd)
+        hidden_dim = int(8 / 3 * config.n_embd)
+        self.mlp = SwiGLU(config.n_embd, hidden_dim)
 
-    def forward(self, x):
+    def forward(self, x, rope_freqs=None, attention_mask=None):
         """
         Forward pass through the transformer block. The input tensor `x` passes through the following operations:
         1. Layer Normalization -> Multi-head Attention -> Residual connection
@@ -106,7 +203,8 @@ class TransformerBlock(nn.Module):
             Tensor: The output tensor after applying the attention and MLP layers, with the same shape as the input.
         """
         # Apply the multi-head attention with residual connection
-        x = x + self.attn(self.ln1(x))  # (B, T, n_embd)
+        x = x + self.attn(self.ln1(x), rope_freqs=rope_freqs, attention_mask=attention_mask)
+
         # Apply the MLP with residual connection
         x = x + self.mlp(self.ln2(x))  # (B, T, n_embd)
         return x

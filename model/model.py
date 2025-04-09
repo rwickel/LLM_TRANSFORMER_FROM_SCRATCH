@@ -34,6 +34,16 @@ class DecoderModel(nn.Module):
         # Final layer normalization to be applied after all transformer blocks
         self.final_norm = RMSNorm(config.n_embd)
 
+        # # Initialize RoPE cache
+        # self.register_buffer(
+        #     "rope_cache",
+        #     build_rope_cache(
+        #         seq_len=config.block_size,
+        #         dim=self.config.n_embd // self.config.n_head,
+        #         device=config.device
+        #     )
+        # )
+
     def forward(self, idx):
         """
         Forward pass through the decoder model. The input tensor `idx` is passed through the token embedding layer,
@@ -68,31 +78,88 @@ class DecoderLM(nn.Module):
     """
     def __init__(self, config: TransformerConfig):
         super().__init__()
+        self.config = config
         # Initialize the transformer decoder model
         self.transformer = DecoderModel(config)
         # Linear layer to project the output embeddings into the vocabulary size space for prediction
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)  # bias=True by default
 
-    def forward(self, idx, targets=None):
+        self.eos_token_id = getattr(config, 'eos_token_id', 50256) 
+
+    def forward(self, input_ids, attention_mask=None, targets=None):
         """
         Forward pass through the decoder language model. The input tensor `idx` is passed through the transformer decoder,
         and the logits for next-token prediction are computed. If targets are provided, the loss is also calculated.
         
         Args:
-            idx (Tensor): The input tensor containing token IDs (B, T).
+            input (Tensor): The input tensor containing token IDs (B, T).
             targets (Optional[Tensor], optional): The ground truth token IDs for calculating the loss. Defaults to None.
         
         Returns:
             logits (Tensor): The output logits, representing the likelihood of each token in the vocabulary.
             loss (Optional[Tensor]): The cross-entropy loss if targets are provided.
-        """
-        # Pass the input token IDs through the transformer model
-        x = self.transformer(idx)
+        """        
+        # Pass the input token IDs through the transformer model (returns hidden states/embeddings)
+        hidden_states = self.transformer(input_ids)
         # Compute logits by projecting the embeddings to vocabulary size
-        logits = self.lm_head(x)
+        logits = self.lm_head(hidden_states)
 
         if targets is not None:
-            # Compute the loss by comparing the predicted logits with the target tokens
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            if attention_mask is not None:
+                # Mask out padding tokens in loss calculation
+                loss_mask = attention_mask.view(-1) == 1
+                logits = logits.view(-1, logits.size(-1))[loss_mask]
+                targets = targets.view(-1)[loss_mask]
+                
+            loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),  # (batch_size * seq_len, vocab_size)
+            targets.view(-1),                  # (batch_size * seq_len)
+            ignore_index=self.config.pad_token_id  # Skip [PAD] tokens in loss
+        )
             return logits, loss
-        return logits     # If no targets are provided, return the logits
+        return logits
+    
+
+    def generate(self, input_ids, max_length=512, temperature=1.0, top_k=50):
+        """
+        Generate text autoregressively.
+        
+        Args:
+            input_ids (Tensor): The starting input sequence (e.g., the prompt).
+            max_length (int): Maximum length of generated sequence.
+            temperature (float): Controls randomness of predictions. Higher values = more random.
+            top_k (int): Limits the sampling pool to the top k logits.
+        
+        Returns:
+            Tensor: The generated token IDs.
+        """
+        device = input_ids.device
+        generated_ids = input_ids
+
+        # Loop to generate tokens
+        for _ in range(max_length):
+            # Pass the current input through the model to get logits and hidden states for the next token
+            logits = self.forward(generated_ids)
+            logits = logits[:, -1, :]  # Get logits for the last token
+            logits = logits / temperature  # Scale logits by temperature for randomness control
+
+            # Apply top-k sampling if specified
+            if top_k > 0:
+                top_k_values, top_k_indices = logits.topk(top_k, dim=-1)
+                logits = torch.zeros_like(logits).scatter_(-1, top_k_indices, top_k_values)
+            
+            # Sample a token from the distribution (sampling the next token)
+            next_token = torch.multinomial(torch.softmax(logits, dim=-1), 1)
+            next_token = next_token.squeeze(1)  # Remove extra dimensions
+
+            # Print the generated token and its ID
+            #print(f"Generated token: {next_token.item()} (ID: {next_token.item()})")
+
+            # Append the generated token to the input sequence
+            generated_ids = torch.cat((generated_ids, next_token.unsqueeze(1)), dim=1)
+
+            # If the token is an end-of-sequence token, break early
+            if next_token.item() == 102:
+                break
+
+        return generated_ids

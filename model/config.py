@@ -4,16 +4,19 @@ from dataclasses import dataclass
 from typing import Optional
 import torch
 
+
 @dataclass
 class TransformerConfig:
     n_embd: int                   # Embedding dimension
     n_head: int                   # Number of attention heads
-    n_kv_head: Optional[int] = None  # Number of KV heads (for GQA); defaults to n_head if None
+    n_kv_head: Optional[int] = None  # Number of KV heads (for GQA); defaults to n_head if None    
     n_layer: int = 12             # Number of transformer blocks
+    use_rope: bool = False        # Whether to use RoPE (Rotary Positional Embeddings)
     vocab_size: int = 50257       # Vocabulary size
     block_size: int = 2048        # Max sequence length
     dropout: float = 0.1          # Dropout rate
     device: str = "cuda"          # Device
+    pad_token_id: int = 0         # Padding token ID
 
 
 def check_device():
@@ -48,8 +51,11 @@ def get_model_config(embed_model, tokenizer, device):
         n_head=8,
         n_kv_head=4,
         n_layer=4,
+        use_rope=False,   
         vocab_size=tokenizer.vocab_size,
-        block_size=embed_model.config.max_position_embeddings, #512
+        block_size=embed_model.config.max_position_embeddings, #512        
         dropout=0.1,
-        device=device.type
+        device=device.type,
+        pad_token_id=tokenizer.pad_token_id, #ignored in the model loss function
     )
+
