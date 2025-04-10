@@ -35,7 +35,7 @@ if __name__ == "__main__":
     model_name = 'sentence-transformers/all-MiniLM-L6-v2'
 
     gradient_clipping_norm = 1.0
-    early_stopping_patience = 6
+    early_stopping_patience = 10
     decay_lr = True
     warmup_iters = 15
     lr_decay_iters = max_iters
@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
     # --- Setup ---
     device = check_device()
+    device = torch.device("cpu")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     embed_model_for_config = AutoModel.from_pretrained(model_name)
 
@@ -84,16 +85,16 @@ if __name__ == "__main__":
     wiki_sample_text = "A transformer is a deep learning model introduced in 2017, used primarily in the field of natural language processing (NLP). It is based on a self-attention mechanism that allows the model to weigh the importance of different words in a sentence, regardless of their position. This architecture has led to significant advancements in various NLP tasks, including translation, summarization, and text generation."
     encoding = tokenizer(wiki_sample_text, return_tensors='pt', padding='max_length', truncation=True, max_length=config.block_size, add_special_tokens=True)
     input_ids = encoding['input_ids']
+    attention_mask = encoding['attention_mask'] # <-- Gets the MASK (1s and 0s)
 
     # Prepare Targets for GPT-style Loss (shifted input_ids)
     targets = input_ids.clone()
     targets = torch.roll(targets, shifts=-1, dims=1)
-    targets[:, -1] = -1  # Set the last token's target to -1 (ignore index)
+    targets[:, -1] = -100  # Set the last token's target to -1 (ignore index)
 
     # Move to device
     input_ids = input_ids.to(device)
     targets = targets.to(device)
-
     
     print(f"Input IDs shape: {input_ids.shape}")
     print(f"Targets shape: {targets.shape}")
@@ -118,7 +119,7 @@ if __name__ == "__main__":
         optimizer.zero_grad(set_to_none=True)
 
         # Forward pass (no mixed precision)
-        logits, loss = model(input_ids, targets=targets)
+        logits, loss = model(input_ids, attention_mask=attention_mask, targets=targets)
 
         if loss is not None:
             loss.backward()

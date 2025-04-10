@@ -114,8 +114,14 @@ class MultiHeadAttention(nn.Module):
                 self.head_dim,
                 torch.device(config.device) # Build cache on the configured device
             ), persistent=False)
+            #self.register_buffer("_rope_freqs_impl", self.rope_freqs) # Register buffer    
 
-    def forward(self, x: torch.Tensor, use_cache: bool = False, cache_position: int = 0) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                attention_mask: Optional[torch.Tensor] = None, # Added attention_mask
+                use_cache: bool = False, # Keep cache args if used by generate
+                cache_position: int = 0) -> torch.Tensor:
+        
         # Note: This version does NOT accept or use an attention_mask argument
         B, T, C = x.size()
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
@@ -134,17 +140,61 @@ class MultiHeadAttention(nn.Module):
 
         att_scores = (q @ k.transpose(-2, -1)) * self.scale
 
-        # --- Causal Masking (Only) ---
-        # This version only applies the default causal mask, ignoring any padding mask
-        default_causal_mask = torch.ones(T, T, dtype=torch.bool, device=att_scores.device).tril()
-        att_scores = att_scores.masked_fill(~default_causal_mask.view(1, 1, T, T), float('-inf'))
-        # --- End Causal Masking ---
+        # # --- Causal Masking (Only) ---
+        # # This version only applies the default causal mask, ignoring any padding mask
+        # default_causal_mask = torch.ones(T, T, dtype=torch.bool, device=att_scores.device).tril()
+        # att_scores = att_scores.masked_fill(~default_causal_mask.view(1, 1, T, T), float('-inf'))
+        # # --- End Causal Masking ---
 
+        # att_weights = F.softmax(att_scores, dim=-1)
+        # att_weights = self.dropout(att_weights)
+        # att_output = att_weights @ v
+        # att_output = att_output.transpose(1, 2).contiguous().view(B, T, C)
+        # att_output = self.out_proj(att_output)
+        # --- Apply Combined Causal and Padding Mask ---
+        mask = None
+        # 1. Create Causal Mask (lower triangle)
+        # Needs to be on the same device as att_scores
+        causal_mask = torch.ones(T, T, dtype=torch.bool, device=att_scores.device).tril()
+        causal_mask = causal_mask.view(1, 1, T, T) # Reshape for broadcasting (1, 1, T, T)
+
+        # 2. Process Padding Mask (if provided)
+        if attention_mask is not None:
+             # Input mask is typically (B, T) or (B, 1, T) etc.
+             # Expand it to broadcast across heads and query sequence length: (B, 1, 1, T)
+             # This blocks attention *to* padding tokens (keys).
+             if attention_mask.dim() == 2: # (B, T) -> (B, 1, 1, T)
+                 padding_mask = attention_mask.view(B, 1, 1, T).expand(-1, -1, T, -1)
+             elif attention_mask.dim() == 3: # (B, 1, T) -> (B, 1, 1, T) ?? Check convention
+                 padding_mask = attention_mask.unsqueeze(2).expand(-1, -1, T, -1)
+             else: # Assume it's already broadcastable like (B, 1, T, T) or similar
+                  padding_mask = attention_mask
+
+             # Convert padding mask to boolean if necessary (True where attention IS allowed)
+             if padding_mask.dtype != torch.bool:
+                 padding_mask = padding_mask.bool()
+
+             # Combine masks: Attend only where BOTH causal AND padding masks allow
+             mask = causal_mask & padding_mask # (B, 1, T, T) - broadcasts across heads
+
+        else:
+             # If no padding mask, use only the causal mask
+             mask = causal_mask # (1, 1, T, T) - broadcasts across batch and heads
+
+        # Apply the combined mask. Fill with -inf where mask is False.
+        att_scores = att_scores.masked_fill(~mask, float('-inf'))
+        # --- End Mask Application ---
+
+        # Calculate attention weights (softmax)
         att_weights = F.softmax(att_scores, dim=-1)
-        att_weights = self.dropout(att_weights)
-        att_output = att_weights @ v
-        att_output = att_output.transpose(1, 2).contiguous().view(B, T, C)
-        att_output = self.out_proj(att_output)
+        att_weights = self.dropout(att_weights) # Apply dropout
+
+        # Apply attention weights to values
+        att_output = att_weights @ v # (B, H, T, D_h)
+
+        # Combine heads and project output
+        att_output = att_output.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C=n_embd)
+        att_output = self.out_proj(att_output) # Final projection
         return att_output
 # --- End of MultiHeadAttention ---
 
@@ -159,7 +209,7 @@ class TransformerBlock(nn.Module):
         self.mlp = SwiGLU(config.n_embd, hidden_dim, bias=config.bias)
         self.config = config
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Forward pass through the transformer block.
 
@@ -172,7 +222,7 @@ class TransformerBlock(nn.Module):
             Output tensor of the same shape as input.
         """
         # Pass x to attention, note that the provided attention_mask is ignored by the new self.attn.forward
-        attn_output = self.attn(self.ln1(x)) # Pass only x
+        attn_output = self.attn(self.ln1(x), attention_mask=attention_mask)
         x = x + attn_output
         mlp_output = self.mlp(self.ln2(x))
         x = x + mlp_output

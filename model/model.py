@@ -29,13 +29,22 @@ class DecoderModel(nn.Module):
         self.final_norm = RMSNorm(config.n_embd)
         # Note: RoPE cache is handled within MultiHeadAttention layer
 
-    def forward(self, idx: torch.Tensor) -> torch.Tensor:
-        # This forward pass still accepts attention_mask, but generate won't pass it
+    def forward(self, idx: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Forward pass for the decoder stack.
+
+        Args:
+            idx: Input token IDs (B, T).
+            attention_mask: Mask for padding tokens (B, T). (Optional)
+
+        Returns:
+            Tensor: Output hidden states (B, T, n_embd).
+        """
         B, T = idx.size()
         x = self.token_emb(idx) # (B, T, n_embd)
         for block in self.blocks:
             # Pass mask if provided (though generate won't provide it now)
-            x = block(x)
+            x = block(x, attention_mask=attention_mask)
         x = self.final_norm(x) # (B, T, n_embd)
         return x
 
@@ -71,8 +80,10 @@ class DecoderLM(nn.Module):
 
 
     def forward(self,
-                input_ids: torch.Tensor,                
-                targets: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                input_ids: torch.Tensor,
+                attention_mask: Optional[torch.Tensor] = None, # Added attention_mask argument
+                targets: Optional[torch.Tensor] = None,
+                ignore_idx = -100) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         Forward pass for training or inference.
         (Using GPT-style loss calculation as per previous step)
@@ -91,21 +102,24 @@ class DecoderLM(nn.Module):
         """
         # Pass input token IDs and mask through the transformer model
         # Note: attention_mask is accepted here but won't be passed by the new generate
-        hidden_states = self.transformer(input_ids) # (B, T, n_embd)
+        hidden_states = self.transformer(input_ids, attention_mask=attention_mask) # (B, T, n_embd)
 
         # Compute logits for the entire sequence
         logits = self.lm_head(hidden_states) # (B, T, vocab_size)
 
         loss = None
         if targets is not None:
-            # --- GPT-style Loss Calculation ---
+            # Determine ignore index (-100 is standard for HF DataCollator, -1 was used in original script)
+            # Let's ignore_idx default to -100 as it's safer with HF collator. Check your target prep if using manual -1.            
+            # if self.config.pad_token_id is not None: # Another way, if targets use pad_id
+            #    ignore_idx = self.config.pad_token_id
+
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), # Reshape logits to (B*T, V)
                 targets.view(-1),                 # Reshape targets to (B*T,)
-                ignore_index=-1                   # Use -1 as the ignore index
+                ignore_index=ignore_idx           # Use ignore index
             )
-            return logits, loss
-            # --- End GPT-style Loss ---
+            return logits, loss        
 
         return logits, None # Loss is None here
 
