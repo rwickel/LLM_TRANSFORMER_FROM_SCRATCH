@@ -1,0 +1,14 @@
+Dataset Name: bookcorpus
+Dataset Config/ID: plain_text
+Original Splits Available: ['train']
+--- Sample Counts After Processing ---
+Train samples: 73264185
+Validation samples: 740043
+Test samples: Not available
+
+--- Sample Training Examples (First 5) ---
+[1] i just want you gone ! ''
+[2] `` good .
+[3] `` you found something ! ''
+[4] her dark-rooted hair was in clumps , and she was still filthy from the blast site .
+[5] i believe we shall have two , maybe three , more days to prepare the attack on the dead marsh .

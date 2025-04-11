@@ -1,10 +1,14 @@
+import os
+# Set the environment variable BEFORE importing tensorflow
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoConfig, AutoModel
 from dataclasses import dataclass, field # Import field
 from typing import Optional # Import Optional
-import os
+
 from model.config import TransformerConfig, check_device, get_model_config
 from model.layers import RMSNorm, SwiGLU, MultiHeadAttention, TransformerBlock
 from model.positional_encoding import build_rope_cache, apply_rope
@@ -43,7 +47,7 @@ if __name__ == "__main__":
 
     # --- Setup ---
     device = check_device()
-    device = torch.device("cpu")
+    
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     embed_model_for_config = AutoModel.from_pretrained(model_name)
 
@@ -94,6 +98,7 @@ if __name__ == "__main__":
 
     # Move to device
     input_ids = input_ids.to(device)
+    attention_mask = attention_mask.to(device) 
     targets = targets.to(device)
     
     print(f"Input IDs shape: {input_ids.shape}")
@@ -165,7 +170,7 @@ if __name__ == "__main__":
 
     # --- Starting Generation Example ---
 print("\n--- Starting Generation Example ---")
-prompt = "Transformer"
+prompt = "deep learning model"
 print(f"Prompt: '{prompt}'")
 
 # --- CORRECT ENCODING ---

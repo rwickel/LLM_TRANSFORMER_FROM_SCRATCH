@@ -11,10 +11,10 @@ class TrainingConfig:
     validation_split_percentage: float = 0.01 # Used only if dataset has no 'validation' split
     max_seq_length: int = 512 # Max sequence length for tokenization/model context
 
-    train_data_subset_fraction: float = 0.001 # between 0 and 1, 1 for using the whole dataset
-
+    train_data_subset_fraction: float = 0.0001 # between 0 and 1, 1 for using the whole dataset
+    vram_log_interval: int =1
     # Training Hyperparameters
-    num_epochs: int = 10 # Adjust total epochs
+    num_epochs: int = 3 # Adjust total epochs
     batch_size: int = 4 # Per device batch size
     gradient_accumulation_steps: int = 8 # Effective batch size = batch_size * accumulation_steps
     base_learning_rate: float = 5e-5

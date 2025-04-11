@@ -107,14 +107,12 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
         self.use_rope = config.use_rope
+        self.use_rope = config.use_rope
         if self.use_rope:
-            # Note: build_rope_cache needs to be defined elsewhere in this file or imported
-            self.register_buffer("rope_freqs", build_rope_cache(
-                config.block_size,
-                self.head_dim,
-                torch.device(config.device) # Build cache on the configured device
-            ), persistent=False)
-            #self.register_buffer("_rope_freqs_impl", self.rope_freqs) # Register buffer    
+             self._rope_freqs_buffer_name = "rope_freqs"
+             # Register buffer, but initialize lazily in forward
+             self.register_buffer(self._rope_freqs_buffer_name, None, persistent=False)
+             
 
     def forward(self,
                 x: torch.Tensor,
@@ -205,7 +203,12 @@ class TransformerBlock(nn.Module):
         self.ln1 = RMSNorm(config.n_embd)
         self.attn = MultiHeadAttention(config) # Uses the updated MultiHeadAttention
         self.ln2 = RMSNorm(config.n_embd)
-        hidden_dim = int(8 / 3 * config.n_embd)
+        if config.intermediate_size is None:
+             # Fallback if not set in config (though it should be)
+             print("Warning: config.intermediate_size not set, calculating MLP hidden_dim.")
+             hidden_dim = 4 * config.n_embd # A common default
+        else:
+             hidden_dim = config.intermediate_size
         self.mlp = SwiGLU(config.n_embd, hidden_dim, bias=config.bias)
         self.config = config
 

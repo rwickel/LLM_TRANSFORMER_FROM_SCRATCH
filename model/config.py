@@ -8,18 +8,29 @@ from transformers import PretrainedConfig, AutoTokenizer # Added PretrainedConfi
 @dataclass
 class TransformerConfig:
     """Configuration class for the Transformer model."""
-    block_size: int = 128 # Max sequence length
-    vocab_size: int = 30522 # Placeholder, will be updated by tokenizer
-    n_layer: int = 6      # Number of transformer blocks
-    n_head: int = 6       # Number of attention heads
-    n_embd: int = 384     # Embedding dimension
-    n_kv_head: Optional[int] = None # Number of key/value heads for Grouped Query Attention (if None, defaults to n_head)
-    dropout: float = 0.1  # Dropout rate
-    bias: bool = False    # Use bias in Linear layers?
-    device: str = 'cpu'   # Device to run on ('cpu', 'cuda', 'mps')
-    pad_token_id: int = 0 # Padding token ID, updated by tokenizer
-    use_rope: bool = True # Use Rotary Positional Embeddings?
-    eos_token_id: Optional[int] = None # End-of-sequence token ID, updated by tokenizer
+    # --- Core Dimensions ---
+    block_size: int = 512
+    vocab_size: int = 30522
+    n_layer: int = 6
+    n_head: int = 6
+    n_embd: int = 384
+    n_kv_head: Optional[int] = None
+    intermediate_size: Optional[int] = 4* n_embd
+    dropout: float = 0.1
+    bias: bool = False
+
+    device: Optional[str] = None
+
+    # --- Positional Embeddings ---
+    use_rope: bool = True
+    rope_theta: float = 10000.0
+
+    # --- Initialization & Misc ---
+    tie_weights: bool = True
+    init_std: float = 0.02
+    pad_token_id: Optional[int] = None
+    eos_token_id: Optional[int] = None
+
 
 
 def check_device():
@@ -53,15 +64,16 @@ def get_model_config(base_config: PretrainedConfig, tokenizer: AutoTokenizer,seq
     config_data = {
         'block_size': seq_lenght,
         'vocab_size': tokenizer.vocab_size,
-        'n_layer': 6,
+        'n_layer': 4,
         'n_head': 6,
         'n_embd': base_config.hidden_size,
         'n_kv_head': None,
         'dropout': 0.1,
+        'intermediate_size': 4 * base_config.hidden_size,
         'bias': False,
         'device': str(device), # Store device as string
         'pad_token_id': tokenizer.pad_token_id,
         'use_rope': False,
-        'eos_token_id': tokenizer.eos_token_id
+        'eos_token_id': tokenizer.sep_token_id
     }
     return TransformerConfig(**config_data)
