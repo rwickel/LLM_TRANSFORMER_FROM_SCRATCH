@@ -94,6 +94,17 @@ class Trainer:
               print(f"Error loading checkpoint state: {e}. Starting training from scratch.")
 
 
+    def print_vram_usage(self):
+        """Print the current VRAM usage."""
+        if torch.cuda.is_available():
+            allocated = torch.cuda.memory_allocated()
+            reserved = torch.cuda.memory_reserved()
+            print(f"Allocated memory: {allocated / (1024 ** 3):.2f} GB")
+            print(f"Reserved memory: {reserved / (1024 ** 3):.2f} GB")
+        else:
+            print("CUDA is not available.")
+    
+    
     @torch.no_grad()
     def _validate(self):
         """Performs validation on the validation set."""
@@ -201,7 +212,7 @@ class Trainer:
                     is_best = val_loss < self.best_val_loss
                     if is_best:
                         self.best_val_loss = val_loss
-                    print(f"\nStep {actual_step_num}: Validation Loss = {val_loss:.4f} (Best: {self.best_val_loss:.4f})")
+                    print(f"\nStep {actual_step_num}: Validation Loss = {val_loss:.6f} (Best: {self.best_val_loss:.6f})")
                     self._save_checkpoint(is_best=is_best)
                     self.model.train()
                     # Re-open the iterator description for the next steps
@@ -214,6 +225,10 @@ class Trainer:
                                           ncols=100)
 
 
+            # Track VRAM usage periodically
+            if step % self.config.vram_log_interval == 0:
+                self.print_vram_usage()
+            
             self.global_step += 1
 
         # Ensure the loop is closed at the end of the epoch if not already closed by eval
@@ -255,7 +270,7 @@ class Trainer:
 
             epoch_end_time = time.time()
             epoch_duration = epoch_end_time - epoch_start_time
-            print(f"Epoch {self.current_epoch}/{self.config.num_epochs} Summary | Avg Train Loss: {avg_train_loss:.4f} | Val Loss: {val_loss:.4f} (Best: {self.best_val_loss:.4f}) | Duration: {epoch_duration:.2f}s")
+            print(f"Epoch {self.current_epoch}/{self.config.num_epochs} Summary | Avg Train Loss: {avg_train_loss:.6f} | Val Loss: {val_loss:.6f} (Best: {self.best_val_loss:.6f}) | Duration: {epoch_duration:.2f}s")
 
             # Save latest checkpoint (and potentially best again if end-of-epoch validation was better)
             self._save_checkpoint(is_best=is_best)

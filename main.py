@@ -1,52 +1,49 @@
+# main.py
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModel
-from model.config import TransformerConfig, check_device, get_model_config
-from model.model import DecoderModel, DecoderLM
+import torch.optim as optim
+# ****** Import AutoModel explicitly ******
+from transformers import AutoTokenizer, AutoConfig, AutoModel
+import os
+import random
+import numpy as np
+import os
+
+# --- Custom Model Imports ---
+from model.config import TransformerConfig, get_model_config
+from model.model import DecoderLM
+
+# --- Trainer Imports ---
+from trainer.utils import load_model_from_checkpoint
+from trainer.config import TrainingConfig
+from trainer.utils import check_device
+# --- Configuration ---
+config = TrainingConfig()
 
 device = check_device()
 
-# Load pre-trained sentence transformer
-tokenizer = AutoTokenizer.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
-embed_model = AutoModel.from_pretrained('sentence-transformers/all-MiniLM-L6-v2')
+# --- Optional: Load best model and generate ---
+print("\n--- Loading best model for generation example ---")
+best_model_path = os.path.join(config.save_path, config.checkpoint_filename_best)
+loaded_model, loaded_tokenizer, _, loaded_model_config = load_model_from_checkpoint(best_model_path, device=device)
 
-# Print vocab size to match it with the config
-print("Vocab size:", tokenizer.vocab_size)
+if loaded_model and loaded_tokenizer:
+    prompt = "Egypt" # Example prompt
+    print(f"Prompt: '{prompt}'")
 
-config = get_model_config(embed_model, tokenizer, device)
+    encoding = loaded_tokenizer(prompt, return_tensors='pt', add_special_tokens=False)
+    prompt_tensor = encoding['input_ids'].to(device)
 
-model = DecoderLM(config).to(device)
+    loaded_model.eval()
+    with torch.no_grad():
+            generated_output_ids = loaded_model.generate(
+                prompt_tensor,
+                max_tokens=min(150, loaded_model_config.block_size),
+                temperature=0.7,
+                top_k=40                
+            )
 
-# Define a sentence to test the model
-sentence = "The car is red. What is the car color?"
-
-target = "The car is red"
-
-# Tokenize the sentence using the pre-trained tokenizer
-inputs = tokenizer(sentence, return_tensors="pt", padding=True, truncation=True, max_length=config.block_size)
-
-# Extract input IDs (tokenized sentence) and move to the correct device
-dummy_input = inputs["input_ids"].to(device)
-
-# Ensure the target is the same for next-token prediction
-targets = dummy_input
-
-# Pass the input to the model
-logits, loss = model(inputs["input_ids"].to(device), targets=targets)
-
-# Get the logits for the last token
-probs = F.softmax(logits, dim=-1) 
-
-# Get the predicted token IDs
-predicted_ids = torch.argmax(probs, dim=-1) 
-
-# Decode the predicted IDs back to text
-predicted_tokens = tokenizer.decode(predicted_ids[0], skip_special_tokens=True)
-
-# Print the predicted tokens (next word prediction)
-print(f"Predicted tokens: {predicted_tokens}")
-
-# Print the shapes and the loss
-print("Logits shape:", logits.shape)
-print("Loss:", loss.item())
+    generated_text = loaded_tokenizer.decode(generated_output_ids[0], skip_special_tokens=True)
+    print(f"Generated Text: '{generated_text}'")
+    print("--- Generation Example Complete ---")
+else:
+    print(f"Could not load the best model from {best_model_path} for generation.")
