@@ -2,7 +2,8 @@
 import math
 import torch
 import os
-
+from trainer.data_utils import load_and_prepare_data, create_dataloaders
+import re 
 # --- Learning Rate Scheduler (Cosine with Warmup) ---
 # Note: 'it' here refers to training step (batch number), not epoch
 def get_lr(it, warmup_steps, total_steps, learning_rate, min_lr):
@@ -18,19 +19,33 @@ def get_lr(it, warmup_steps, total_steps, learning_rate, min_lr):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (learning_rate - min_lr)
 
-# --- Device Check ---
-# (Assuming this was previously in model.config)
-def check_device():
-    """Checks for CUDA availability and returns the appropriate device."""
-    if torch.cuda.is_available():
-        print(f"CUDA is available. Using GPU: {torch.cuda.get_device_name(0)}")
-        return "cuda"
-    else:
-        print("CUDA not available. Using CPU.")
-        return "cpu"
+
+def load_checkpoint(model, optimizer, scaler, checkpoint_dir):
+        checkpoint_files = os.listdir(checkpoint_dir)
+        if len(checkpoint_files) > 0:
+            latest_checkpoint = max(
+                checkpoint_files,
+                key=lambda f: int(re.search(r'epoch_(\d+)', f).group(1))
+            )
+            checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
+            print(f"Resuming training from checkpoint: {checkpoint_path}")
+
+            checkpoint = torch.load(checkpoint_path)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            epoch = checkpoint['epoch']
+            loss = checkpoint['loss']
+            iter_num = checkpoint['iter_num']
+            return epoch, iter_num, loss
+        else:
+            print("No checkpoint found. Starting from scratch.")
+            return 0, 0, float('inf')
+
+
 
 # --- Function to load model and tokenizer from checkpoint ---
-def load_model_from_checkpoint(checkpoint_path: str, device: str = 'cpu'):
+def load_model_from_checkpoint2(checkpoint_path: str, device: str = 'cpu'):
     """
     Loads a model and tokenizer from a saved checkpoint.
 
@@ -81,3 +96,6 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str = 'cpu'):
         import traceback
         traceback.print_exc()
         return None, None, None, None
+    
+
+ 

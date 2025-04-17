@@ -3,7 +3,8 @@
 import os
 # Set the environment variable BEFORE importing tensorflow
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-
+from torch.utils.data import DataLoader
+from transformers import DataCollatorForLanguageModeling
 import torch
 import torch.optim as optim
 # ****** Import AutoModel explicitly ******
@@ -19,8 +20,8 @@ from model.model import DecoderLM
 
 # --- Trainer Imports ---
 from trainer.config import TrainingConfig
-from trainer.utils import check_device, get_lr, load_model_from_checkpoint
-from trainer.data_utils import load_and_prepare_data, create_dataloaders
+from trainer.utils import get_lr, load_model_from_checkpoint
+from trainer.data_utils import load_and_prepare_data,load_data_with_caching, create_dataloaders
 from trainer.trainer import Trainer
 
 def set_seed(seed_value):
@@ -32,16 +33,21 @@ def set_seed(seed_value):
         torch.cuda.manual_seed_all(seed_value)
 
 if __name__ == "__main__":
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  #
+    device = "cpu" 
+
     # --- Configuration ---
     config = TrainingConfig()
+    config.device = device # Update config with actual device
+    config.resume_from_checkpoint = True # Set to True if you want to resume from a checkpoint
+
     # Override tokenizer setting in config if needed to match the model used below
     config.tokenizer_name_or_path = 'sentence-transformers/all-MiniLM-L6-v2'
     # config.base_model_config_name is now less relevant if using AutoModel below
 
     # --- Setup ---
-    set_seed(config.seed)
-    device = check_device()
-    config.device = device # Update config with actual device
+    set_seed(config.seed)     
     os.makedirs(config.save_path, exist_ok=True)
 
     # --- Define the specific model name ---
@@ -99,7 +105,18 @@ if __name__ == "__main__":
 
     # --- Data Preparation ---
     # Data loading now uses the tokenizer derived from model_name_for_config
-    tokenized_train_data, tokenized_val_data = load_and_prepare_data(config, tokenizer)    
+    config.cache_dir = ".\\my_cache_dir" 
+    #tokenized_train_data, tokenized_val_data = load_and_prepare_data(config, tokenizer)  
+    
+    tokenized_train_data, tokenized_val_data = load_data_with_caching(config, tokenizer)
+
+    # Check if datasets are valid before proceeding
+    if tokenized_train_data is None or tokenized_val_data is None:
+        print("Fatal: Data preparation failed. Exiting.")
+        exit()
+    if len(tokenized_train_data) == 0 or len(tokenized_val_data) == 0:
+        print("Fatal: Train or validation dataset is empty after processing. Exiting.")
+        exit()  
 
     if 0.0 < config.train_data_subset_fraction < 1.0:
         num_train_samples = len(tokenized_train_data)
@@ -113,14 +130,36 @@ if __name__ == "__main__":
     elif config.train_data_subset_fraction >= 1.0:
         print("Using the full training dataset.")
     else:
-        raise ValueError("train_data_subset_fraction must be between 0.0 and 1.0 (or >= 1.0 to use all data)")
+        raise ValueError("train_data_subset_fraction must be between 0.0 and 1.0 (or >= 1.0 to use all data)")    
     
-    train_loader, val_loader, data_collator = create_dataloaders(config, tokenizer, tokenized_train_data, tokenized_val_data)
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,  # For Causal Language Modeling (like GPT) shift is done automatically by the DataCollatorForLanguageModeling when you use it with mlm=False
+        return_tensors="pt"
+    )
 
+    train_loader = DataLoader(
+        tokenized_train_data,
+        batch_size=config.batch_size,
+        collate_fn=data_collator,
+        shuffle=True,
+        num_workers=config.num_workers,
+        pin_memory=True
+    )
+
+    val_loader = DataLoader(
+        tokenized_val_data,
+        batch_size=config.batch_size,
+        collate_fn=data_collator,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=True
+    )
+    
     # --- Optimizer ---
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=config.base_learning_rate, # Initial LR, scheduler will adjust
+        lr=config.learning_rate, # Initial LR, scheduler will adjust
         weight_decay=config.weight_decay
     )
 
@@ -137,6 +176,6 @@ if __name__ == "__main__":
     )
 
     # --- Start Training ---
-    trainer.train(resume_from_checkpoint=True)
+    trainer.train(config.resume_from_checkpoint)
 
     

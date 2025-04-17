@@ -3,7 +3,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.positional_encoding import apply_rope, build_rope_cache
 from model.config import TransformerConfig
 import math
 from typing import Optional # Import Optional
@@ -115,86 +114,64 @@ class MultiHeadAttention(nn.Module):
              
 
     def forward(self,
-                x: torch.Tensor,
-                attention_mask: Optional[torch.Tensor] = None, # Added attention_mask
-                use_cache: bool = False, # Keep cache args if used by generate
-                cache_position: int = 0) -> torch.Tensor:
-        
-        # Note: This version does NOT accept or use an attention_mask argument
+            x: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            use_cache: bool = False,
+            cache_position: int = 0) -> torch.Tensor:
+
         B, T, C = x.size()
+
+        # Project to queries, keys, values
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim).transpose(1, 2)
 
+        # Rotary embedding (if used)
         if self.use_rope:
-            # Note: apply_rope needs to be defined elsewhere in this file or imported
-            current_rope_freqs = self.rope_freqs.to(x.device) # Ensure cache is on same device as input
+            current_rope_freqs = self.rope_freqs.to(x.device)
             q = apply_rope(q, current_rope_freqs)
             k = apply_rope(k, current_rope_freqs)
 
+        # Repeat keys/values for multi-query attention
         if self.num_key_value_groups > 1:
             k = k.repeat_interleave(self.num_key_value_groups, dim=1)
             v = v.repeat_interleave(self.num_key_value_groups, dim=1)
 
-        att_scores = (q @ k.transpose(-2, -1)) * self.scale
+        # Compute attention scores
+        att_scores = (q @ k.transpose(-2, -1)) * self.scale  # (B, H, T, T)
 
-        # # --- Causal Masking (Only) ---
-        # # This version only applies the default causal mask, ignoring any padding mask
-        # default_causal_mask = torch.ones(T, T, dtype=torch.bool, device=att_scores.device).tril()
-        # att_scores = att_scores.masked_fill(~default_causal_mask.view(1, 1, T, T), float('-inf'))
-        # # --- End Causal Masking ---
-
-        # att_weights = F.softmax(att_scores, dim=-1)
-        # att_weights = self.dropout(att_weights)
-        # att_output = att_weights @ v
-        # att_output = att_output.transpose(1, 2).contiguous().view(B, T, C)
-        # att_output = self.out_proj(att_output)
-        # --- Apply Combined Causal and Padding Mask ---
-        mask = None
-        # 1. Create Causal Mask (lower triangle)
-        # Needs to be on the same device as att_scores
+        # --- Construct Causal Mask ---
         causal_mask = torch.ones(T, T, dtype=torch.bool, device=att_scores.device).tril()
-        causal_mask = causal_mask.view(1, 1, T, T) # Reshape for broadcasting (1, 1, T, T)
+        causal_mask = causal_mask.view(1, 1, T, T)  # (1, 1, T, T) for broadcasting
 
-        # 2. Process Padding Mask (if provided)
+        # --- Combine with Padding Mask (key-side masking only) ---
         if attention_mask is not None:
-             # Input mask is typically (B, T) or (B, 1, T) etc.
-             # Expand it to broadcast across heads and query sequence length: (B, 1, 1, T)
-             # This blocks attention *to* padding tokens (keys).
-             if attention_mask.dim() == 2: # (B, T) -> (B, 1, 1, T)
-                 padding_mask = attention_mask.view(B, 1, 1, T).expand(-1, -1, T, -1)
-             elif attention_mask.dim() == 3: # (B, 1, T) -> (B, 1, 1, T) ?? Check convention
-                 padding_mask = attention_mask.unsqueeze(2).expand(-1, -1, T, -1)
-             else: # Assume it's already broadcastable like (B, 1, T, T) or similar
-                  padding_mask = attention_mask
-
-             # Convert padding mask to boolean if necessary (True where attention IS allowed)
-             if padding_mask.dtype != torch.bool:
-                 padding_mask = padding_mask.bool()
-
-             # Combine masks: Attend only where BOTH causal AND padding masks allow
-             mask = causal_mask & padding_mask # (B, 1, T, T) - broadcasts across heads
-
+            key_mask = attention_mask.bool().view(B, 1, 1, T)  # (B, 1, 1, T)
+            full_mask = causal_mask & key_mask  # final mask: (B, 1, T, T)
         else:
-             # If no padding mask, use only the causal mask
-             mask = causal_mask # (1, 1, T, T) - broadcasts across batch and heads
+            full_mask = causal_mask  # (1, 1, T, T)
 
-        # Apply the combined mask. Fill with -inf where mask is False.
-        att_scores = att_scores.masked_fill(~mask, float('-inf'))
-        # --- End Mask Application ---
+        # Apply mask: set masked positions to -inf
+        att_scores = att_scores.masked_fill(~full_mask, float('-inf'))
 
-        # Calculate attention weights (softmax)
+        # Compute attention weights
         att_weights = F.softmax(att_scores, dim=-1)
-        att_weights = self.dropout(att_weights) # Apply dropout
+        att_weights = self.dropout(att_weights)
 
-        # Apply attention weights to values
-        att_output = att_weights @ v # (B, H, T, D_h)
+        # Optionally zero out weights for padded queries (optional for safety)
+        if attention_mask is not None:
+            query_mask = attention_mask.bool().view(B, 1, T, 1)  # (B, 1, T, 1)
+            att_weights = att_weights * query_mask  # suppress query-side pads
 
-        # Combine heads and project output
-        att_output = att_output.transpose(1, 2).contiguous().view(B, T, C) # (B, T, C=n_embd)
-        att_output = self.out_proj(att_output) # Final projection
+        # Apply attention to values
+        att_output = att_weights @ v  # (B, H, T, D_h)
+        att_output = att_output.transpose(1, 2).contiguous().view(B, T, C)
+
+        # Final output projection
+        att_output = self.out_proj(att_output)
+
         return att_output
-# --- End of MultiHeadAttention ---
+    # --- End of MultiHeadAttention ---
 
 class TransformerBlock(nn.Module):
     """A single block of the Transformer model."""

@@ -1,6 +1,7 @@
 # model.py
 import torch
 import os
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 # import matplotlib.pyplot as plt # Removed unused imports
@@ -101,7 +102,7 @@ class DecoderLM(nn.Module):
             attention_mask: Mask indicating non-padding tokens (B, T). True for non-padding.
                            *** IMPORTANT: This mask is now passed to the attention layers. ***
             targets: Target token IDs for loss calculation (B, T). Assumed shifted.
-            ignore_idx: Index to ignore in the loss calculation (for padding in targets).
+            ignore_idx: Index to ignore in the loss calculation (for padding in targets). -100 see generic_tokenize_fn
 
         Returns:
             A tuple containing:
@@ -114,98 +115,122 @@ class DecoderLM(nn.Module):
         # Compute logits for the entire sequence
         logits = self.lm_head(hidden_states) # (B, T, vocab_size)
 
+        preds = logits.argmax(dim=-1)
+
+        
+        
         loss = None
         if targets is not None:
-            # Calculate loss using the provided ignore_idx
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), # Reshape logits to (B*T, V)
-                targets.view(-1),                  # Reshape targets to (B*T,)
-                ignore_index=ignore_idx            # Use ignore index
-            )
-            return logits, loss # Return both when targets are provided
+
+            ## DEBUG 
+            for i in range(1):  # Just look at 1 sample
+                RED = "\033[91m"
+                END = "\033[0m"
+                input = input_ids[i][:20].tolist()
+                target = targets[i][:20].tolist()
+                predicted = preds[i][:20].tolist()
+                print("Input:   ", input)
+                print("Target:   ", target)
+
+                # Print Predicted with red color where it differs from target
+                print("Predicted:", end=" ")
+                for t, p in zip(target, predicted):
+                    if t == ignore_idx:
+                        pass
+                    if t == p:
+                        print(f"{p}", end=" ")
+                    else:
+                        print(f"{RED}{p}[{self.config.tokenizer.decode(p)}]{END}", end=" ")
+                print()  # newline
+            ###########
+
+            # Shift logits and targets to align predictions with labels
+            if self.config.shift_labels: # check if the train data already shifted 
+                # Shift logits and targets to align predictions with labels
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_targets = targets[:, 1:].contiguous()
+            else:
+                shift_logits = logits.contiguous()
+                shift_targets = targets.contiguous()
+
+            
+            B, T, V = shift_logits.size()
+            logits_flat = shift_logits.view(-1, V)        # (B*T, V)
+            targets_flat = shift_targets.view(-1)         # (B*T,)
+
+            loss = F.cross_entropy(logits_flat, targets_flat, ignore_index=ignore_idx)     
+
+            return logits, loss  # Optionally return unshifted logits + shifted loss
 
         return logits, None # Return only logits if no targets
 
-    @torch.no_grad()
+    
     def generate(self,
-                 input_ids: torch.Tensor,
-                 max_tokens: int,
-                 temperature: float = 1.0,
-                 top_k: Optional[int] = None,
-                 eos_token_id: Optional[int] = None) -> torch.Tensor:
+             prompt: str,
+             max_tokens: int = 0,
+             temperature: float = 1.0,
+             top_k: Optional[int] = None,
+             ) -> torch.Tensor:
         """
-        Generates token sequences autoregressively. DOES NOT use attention_mask internally
-        during generation loop (relies on causal masking within attention).
-
-        Args:
-            input_ids: Starting sequence of token IDs (B, T_prompt).
-            max_tokens: Maximum number of *new* tokens to generate.
-            temperature: Sampling temperature. 0 means greedy.
-            top_k: If set, restricts sampling to the top k tokens.
-            eos_token_id: Specific EOS token ID to stop generation. Uses config default if None.
-
-        Returns:
-            torch.Tensor: The full sequence including prompt and generated tokens
-                          (B, T_prompt + T_generated).
+        Generates token sequences autoregressively based on a string input (prompt).
+        This version yields token by token for streaming output, starting with the input string.
         """
-        self.eval() # Set model to evaluation mode
-        device = input_ids.device # Generate on the same device as input
+        max_tokens = max_tokens if max_tokens > 0 else self.config.block_size
+        self.eval()  # Set model to evaluation mode
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Use the correct device
+
+        # Tokenize the input string (prompt) into token IDs
+        encoding = self.config.tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+        input_ids = encoding['input_ids'].to(device)
         B, T_prompt = input_ids.size()
-        generated_ids = input_ids # Start with the prompt
+        generated_ids = input_ids  # Start with the prompt tokens
 
-        # Determine EOS token ID
-        stop_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        stop_token_id = self.config.eos_token_id
 
         for _ in range(max_tokens):
             # --- Context Cropping ---
             current_seq_len = generated_ids.size(1)
-            # Only pass the last block_size tokens if sequence gets too long
             if current_seq_len <= self.config.block_size:
                 ids_to_pass = generated_ids
             else:
                 ids_to_pass = generated_ids[:, -self.config.block_size:]
-            # --- End Context Cropping ---
 
             # --- Forward Pass ---
-            # During generation, we rely on the internal causal mask of attention.
-            # We don't need to provide an explicit attention_mask here because
-            # we are generating one token at a time, and the causal mask handles
-            # preventing attention to future positions.
-            logits, _ = self.forward(ids_to_pass, attention_mask=None, targets=None) # No mask needed for causal gen
-            # Get logits for the very last token position
-            next_token_logits = logits[:, -1, :] # Shape: (B, V)
-            # --- End Forward Pass ---
+            logits, _ = self.forward(ids_to_pass, attention_mask=None, targets=None)  # No mask needed for causal gen
+            next_token_logits = logits[:, -1, :]  # Shape: (B, V)
 
-            # --- Sampling Logic (Temperature, Top-K, Sampling/Greedy) ---
+            # --- Sampling Logic ---
             if temperature > 0 and temperature != 1.0:
                 next_token_logits = next_token_logits / temperature
 
             if top_k is not None and top_k > 0:
                 # Ensure k is not larger than vocab size
                 k = min(top_k, next_token_logits.size(-1))
-                top_k_values, _ = torch.topk(next_token_logits, k=k, dim=-1)
-                threshold = top_k_values[:, [-1]] # Get the k-th value
-                # Mask logits below the threshold
+                top_k_values, top_k_indices = torch.topk(next_token_logits, k=k, dim=-1)
+                threshold = top_k_values[:, [-1]]  # Get the k-th value
                 next_token_logits[next_token_logits < threshold] = -float('Inf')
 
-            if temperature == 0: # Greedy decoding
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True) # (B, 1)
-            else: # Sampling
+                # Print top-k predictions
+                #print(f"\n\nTop {k} predicted next tokens:")
+                #top_k_tokens = self.config.tokenizer.decode(top_k_indices[0], skip_special_tokens=True)
+                #print(top_k_tokens)
+
+            # --- Choose Next Token ---
+            if temperature == 0:  # Greedy decoding
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # (B, 1)
+            else:  # Sampling
                 probs = F.softmax(next_token_logits, dim=-1)
-                next_token = torch.multinomial(probs, num_samples=1) # (B, 1)
-            # --- End Sampling Logic ---
+                next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
 
             # --- Append Token ---
             generated_ids = torch.cat((generated_ids, next_token), dim=1)
-            # --- End Append Token ---
 
+            # Decode the next token
+            decoded_token = self.config.tokenizer.decode(next_token.squeeze().cpu(), skip_special_tokens=True)            
+            
             # --- EOS Check ---
-            if stop_token_id is not None and (next_token == stop_token_id).all():
-                # Stop if all sequences in the batch generated EOS
-                # Use .all() for batch generation, maybe refine if needed per-sequence stopping
-                print(f"Stopping generation as EOS token ({stop_token_id}) was generated.")
+            if stop_token_id is not None and (next_token == stop_token_id).all():                
                 break
-            # --- End EOS Check ---
 
-        self.train() # Set model back to training mode
-        return generated_ids
+            # Yield the decoded token to the caller for streaming output
+            yield decoded_token

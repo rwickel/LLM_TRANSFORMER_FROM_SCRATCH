@@ -18,16 +18,14 @@ def preprocess_function(example, tokenizer, max_length):
 
     inputs = tokenizer(
         input_text,
-        truncation=True,
-        padding="max_length",
+        truncation=True,        
         max_length=max_length,
         return_tensors="pt"
     )
 
     labels = tokenizer(
         label_text,
-        truncation=True,
-        padding="max_length",
+        truncation=True,        
         max_length=max_length,
         return_tensors="pt"
     )

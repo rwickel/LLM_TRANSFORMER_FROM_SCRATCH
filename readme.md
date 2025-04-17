@@ -1,4 +1,4 @@
-# IN PROGRESS Transformer Language Model with Rotary Positional Encoding (RoPE) and SwiGLU MLP 
+# Transformer Language Model with Rotary Positional Encoding (RoPE) and SwiGLU MLP
 
 This project implements a transformer-based language model, combining various modern techniques, such as **Rotary Positional Encoding (RoPE)** and **SwiGLU activation** in MLP layers, for token prediction and language modeling tasks. The model is designed to be flexible and modular, making it possible to extend or integrate it into other NLP applications. The code uses PyTorch and Hugging Face's transformers library.
 

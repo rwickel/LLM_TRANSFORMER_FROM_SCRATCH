@@ -37,7 +37,7 @@ The framework assumes the following project structure:
 ## Core Components (`trainer/`)
 
 * **`config.py`**: Defines the `TrainingConfig` dataclass. Modify this file to change hyperparameters like learning rate, batch size, epochs, dataset names, paths, etc.
-* **`data_utils.py`**: Contains functions (`load_and_prepare_data`, `create_dataloaders`) responsible for fetching datasets from Hugging Face Hub, performing train/validation splits, tokenizing the text data using the provided tokenizer, and setting up `DataLoader` instances with a `DataCollatorForLanguageModeling`.
+* **`data_utils.py`**: Contains functions (`create_dataloaders`) responsible for fetching datasets from Hugging Face Hub, performing train/validation splits, tokenizing the text data using the provided tokenizer, and setting up `DataLoader` instances with a `DataCollatorForLanguageModeling`.
 * **`trainer.py`**: Implements the `Trainer` class which orchestrates the entire training process. It handles:
     * Epoch and step iteration.
     * Learning rate scheduling updates.
