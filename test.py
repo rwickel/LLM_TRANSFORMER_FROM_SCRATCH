@@ -1,68 +1,104 @@
+import os
+import re
 import torch
-from data.dataset import load_triviaqa
-from training.util import  preprocess_function, Trainer
-from model.config import TransformerConfig,check_device, get_model_config
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+from model.config import TransformerConfig, get_model_config
 from model.model import DecoderLM
-from transformers import AutoTokenizer, AutoModel
-from torch.utils.data import DataLoader
-# Load your test dataset (replace with actual loading code)
-from data.dataset import load_triviaqa
 
-# Device configuration
-device = check_device()
 
-def test_model(checkpoint_path, tokenizer_path, test_dataset, split="test", max_length=512):
-    """Complete testing pipeline for your pretrained model"""
+# --- Checkpoints Folder ---
+checkpoint_dir = '.\\checkpoints'
+os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # 1. Select the correct split
-    if isinstance(test_dataset, dict):  # If it's a dataset dictionary
-        if split not in test_dataset:
-            raise ValueError(f"Split '{split}' not found. Available splits: {list(test_dataset.keys())}")
-        test_data = test_dataset[split]
-    else:
-        test_data = test_dataset  # Assume it's already a single split
-    
-    # 1. Load the pretrained model
-    print("Loading model...")
-    model = Trainer.load_pretrained_model(checkpoint_path)
-    
-    # 2. Load tokenizer
-    print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    
-    # 3. Prepare test data - use either config.block_size if available, or fallback to max_length
-    block_size = getattr(model.config, 'block_size', max_length)
-    print(f"Using sequence length: {block_size}")
-    
-    print("Preparing test data...")    
-    test_data = test_dataset.map(
-        lambda x: preprocess_function(x, tokenizer, block_size),
-        batched=False
+# --- Set Device ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu") 
+
+# --- Load Tokenizer and Model ---
+embd_model = 'sentence-transformers/all-MiniLM-L6-v2'
+tokenizer = AutoTokenizer.from_pretrained(embd_model)
+
+# Add special tokens if they are missing
+if tokenizer.pad_token is None:
+    print("Tokenizer does not have a pad token. Adding '[PAD]'.")
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids('[PAD]')
+    print(f"Set pad_token_id to: {tokenizer.pad_token_id}")
+
+if tokenizer.eos_token is None:
+    print("Tokenizer does not have an EOS token. Adding '<|endoftext|>'.")
+    tokenizer.add_special_tokens({'eos_token': '<|endoftext|>'})
+    tokenizer.eos_token_id = tokenizer.convert_tokens_to_ids('<|endoftext|>')
+    print(f"Set eos_token_id to: {tokenizer.eos_token_id}")
+
+# --- Load Base Model Config ---
+print(f"Loading base AutoConfig: {embd_model}")
+base_config_obj = AutoConfig.from_pretrained(embd_model)
+
+config = get_model_config(
+        base_config=base_config_obj, # Pass the config object
+        tokenizer=tokenizer,        
+        # No max_seq_length arg needed if get_model_config derives it internally
+    )  
+
+# --- Load the Model ---
+# If using a pre-trained model like GPT-2 or others, use AutoModelForCausalLM:
+embed_model_for_config = AutoModelForCausalLM.from_pretrained(embd_model, config=config)
+
+
+print("Calling get_model_config...")
+# Pass the loaded AutoConfig instance to the updated function
+config = get_model_config(
+    base_config=base_config_obj, # Pass the config object
+    tokenizer=tokenizer,        
+    # No max_seq_length arg needed if get_model_config derives it internally
+)      
+
+print(f"Model Config: {config}")
+model = DecoderLM(config).to(device)
+print(f"Model initialized on device: {next(model.parameters()).device}")
+print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M trainable parameters.")
+      
+
+checkpoint_path = os.path.join(checkpoint_dir, 'checkpoint_epoch_388_loss_0.3473.pt')
+print(f"Resuming training from checkpoint: {checkpoint_path}")
+
+checkpoint = torch.load(checkpoint_path)
+model.load_state_dict(checkpoint['model_state_dict'])
+model.eval()  
+
+# Move model to the correct device (GPU or CPU)
+embed_model_for_config.to(device)
+
+# Put the model in evaluation mode
+embed_model_for_config.eval()
+
+# Assuming `model` and `tokenizer` are initialized and configured
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+print("🧠 Interactive Mode: Type your prompt. Type 'exit' to quit.\n")
+
+while True:
+    prompt = input("You: ")
+
+    if prompt.strip().lower() == "exit":
+        print("👋 Exiting. Bye!")
+        break
+
+    # Tokenize the input prompt
+    encoding = tokenizer(prompt, return_tensors='pt', padding=True, truncation=True)
+    input_ids = encoding['input_ids'].to(device)
+
+    # Generate the text using the model with streaming output
+    print("Model: ")
+    output = model.generate(
+        prompt=prompt,        
+        temperature=0.7,
+        top_k=50       
     )
-    
-    # 4. Create test loader
-    test_loader = DataLoader(
-        test_data,
-        batch_size=4,  # Adjust batch size as needed
-        shuffle=False
-    )
-    
-    # 5. Create trainer instance and run tests
-    trainer = Trainer(model=model)
-    test_results = trainer.test(test_loader, tokenizer, max_length=block_size)
-    
-    return test_results
 
-if __name__ == "__main__":
-    # Example usage
-    checkpoint_path = "training_checkpoints/pretrained_model.pth"
-    tokenizer_path = checkpoint_path.replace('.pth', '_tokenizer')    
+    # Streaming output: Print token by token
+    generated_text = prompt  # Start with the prompt
+    for word in output:        
+        print(f"{word} ", end="", flush=True)   # Print the token (without newline)
     
-    test_dataset = load_triviaqa(sample_size=100)
-    
-    test_results = test_model(
-        checkpoint_path,
-        tokenizer_path,
-        test_dataset,  # This is a DatasetDict
-        split="test",  # Explicitly choose 'test' split       
-    )
+    print()  # Move to a new line after the output is done

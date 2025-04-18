@@ -1,18 +1,11 @@
-# train.py
-
 import os
-# Set the environment variable BEFORE importing tensorflow
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
-from torch.utils.data import DataLoader
-from transformers import DataCollatorForLanguageModeling
-import torch
-import torch.optim as optim
-# ****** Import AutoModel explicitly ******
-from transformers import AutoTokenizer, AutoConfig, AutoModel
-
 import random
 import numpy as np
 import math
+import torch
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer, AutoConfig, DataCollatorForLanguageModeling
 
 # --- Custom Model Imports ---
 from model.config import TransformerConfig, get_model_config
@@ -20,9 +13,9 @@ from model.model import DecoderLM
 
 # --- Trainer Imports ---
 from trainer.config import TrainingConfig
-from trainer.utils import get_lr, load_model_from_checkpoint
-from trainer.data_utils import load_and_prepare_data,load_data_with_caching, create_dataloaders
 from trainer.trainer import Trainer
+from trainer.squad_data import SQuADDataset  # Renamed to avoid shadowing
+from trainer.default_data import create_default_data
 
 def set_seed(seed_value):
     """Sets the seed for reproducibility."""
@@ -32,134 +25,122 @@ def set_seed(seed_value):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed_value)
 
-if __name__ == "__main__":
+if __name__ == "__main__":    
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  #
-    device = "cpu" 
+    os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # --- Configuration ---
     config = TrainingConfig()
-    config.device = device # Update config with actual device
-    config.resume_from_checkpoint = True # Set to True if you want to resume from a checkpoint
-
-    # Override tokenizer setting in config if needed to match the model used below
+    config.device = device  # Update config with actual device
+    config.resume_from_checkpoint = True  # Set to True if you want to resume
+    config.dataset_name = "squad"  # Reflecting the change
     config.tokenizer_name_or_path = 'sentence-transformers/all-MiniLM-L6-v2'
-    # config.base_model_config_name is now less relevant if using AutoModel below
-
+    
     # --- Setup ---
-    set_seed(config.seed)     
+    #set_seed(config.seed)
     os.makedirs(config.save_path, exist_ok=True)
 
     # --- Define the specific model name ---
-    emb_model = 'sentence-transformers/all-MiniLM-L6-v2'
+    emb_model = config.tokenizer_name_or_path  # Use the configured tokenizer name
     print(f"Using '{emb_model}' to derive model config via get_model_config.")
 
     # --- Tokenizer ---
-    # Load tokenizer directly from the specified model name
     print(f"Loading tokenizer: {emb_model}")
-    # Ensure config reflects the tokenizer being used
-   
     tokenizer = AutoTokenizer.from_pretrained(emb_model)
 
     # Handle special tokens
+    tokenizer.add_special_tokens({
+        "bos_token": "<BOS>",
+        "eos_token": "<EOS>",
+        "pad_token": "<PAD>",
+        "additional_special_tokens": [
+            "<DOC>", "<ENDDOC>",
+            "<CTX>", "</CTX>",
+            "<Q>", "</Q>",
+            "<A>", "</A>",
+            "<SYSTEM>", "</SYSTEM>", "<USER>", "</USER>", "<ASSISTANT>", "</ASSISTANT>",
+        ]
+    })
+
     if tokenizer.pad_token is None:
-        print("Adding pad token (using EOS token)")
-        tokenizer.add_special_tokens({'pad_token': tokenizer.eos_token})
-    if tokenizer.eos_token is None:
-         # MiniLM might have SEP/CLS instead of EOS, add EOS if needed for GPT-style
-         print("Adding EOS token '<|endoftext|>'")
-         tokenizer.add_special_tokens({'eos_token': '<|endoftext|>'})
-    print(f"Tokenizer vocab size: {len(tokenizer)}")
+        tokenizer.add_special_tokens({"pad_token": tokenizer.eos_token})
 
     # --- Model Config & Initialization ---
-       # Load ONLY the configuration object (efficient)
     print(f"Loading base AutoConfig: {emb_model}")
     base_config_obj = AutoConfig.from_pretrained(emb_model)
-   
+
     print("Calling get_model_config...")
-    # Pass the loaded AutoConfig instance to the updated function
     model_config = get_model_config(
-        base_config=base_config_obj, # Pass the config object
+        base_config=base_config_obj,
         tokenizer=tokenizer,
         device=device
-        # No max_seq_length arg needed if get_model_config derives it internally
     )
+    model_config.shift_labels = False 
 
-    # Validate the returned config type
+    config.max_seq_length = model_config.block_size  # Set max_seq_length in config
+
     if not isinstance(model_config, TransformerConfig):
-         raise TypeError(f"get_model_config must return an instance of TransformerConfig, but got {type(model_config)}")
+        raise TypeError(
+            f"get_model_config must return an instance of TransformerConfig, but got {type(model_config)}")
 
-    # Optional: Sanity check block_size vs tokenizer max_length
-    if model_config.block_size < config.max_seq_length:
-        print(f"Warning: Model block_size ({model_config.block_size}) is less than data tokenization max_seq_length ({config.max_seq_length}). Data will be truncated to model's block_size during training if not handled by model.")
-    elif model_config.block_size > config.max_seq_length:
-         print(f"Info: Model block_size ({model_config.block_size}) is larger than data tokenization max_seq_length ({config.max_seq_length}). Padding/truncation handled by data prep.")
-
-
+    
     print(f"Initializing model with config from get_model_config: {model_config}")
     model = DecoderLM(model_config).to(device)
-    
+
     print(f"Model initialized on device: {next(model.parameters()).device}")
-    print(f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.2f}M trainable parameters.")
-    
+    print(
+        f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M trainable parameters.")
 
-    # --- Data Preparation ---
-    # Data loading now uses the tokenizer derived from model_name_for_config
-    config.cache_dir = ".\\my_cache_dir" 
-    #tokenized_train_data, tokenized_val_data = load_and_prepare_data(config, tokenizer)  
-    
-    tokenized_train_data, tokenized_val_data = load_data_with_caching(config, tokenizer)
+    # --- Data Preparation --- Simplified Call ---
+    print(f"Preparing SQuAD data using SQuADDataset...")
 
-    # Check if datasets are valid before proceeding
-    if tokenized_train_data is None or tokenized_val_data is None:
-        print("Fatal: Data preparation failed. Exiting.")
-        exit()
-    if len(tokenized_train_data) == 0 or len(tokenized_val_data) == 0:
-        print("Fatal: Train or validation dataset is empty after processing. Exiting.")
-        exit()  
+    #train_dataset = SQuADDataset(tokenizer, config, split="train", max_samples=100)
+    train_dataset = create_default_data(tokenizer, config, split="train", max_samples=100)
+    #val_dataset   = SQuADDataset(tokenizer, config, split="validation", max_samples=100) # not used see
 
+
+    # --- Subsetting (applied AFTER tokenization) ---
     if 0.0 < config.train_data_subset_fraction < 1.0:
-        num_train_samples = len(tokenized_train_data)
+        num_train_samples = len(train_dataset)
         subset_size = math.ceil(num_train_samples * config.train_data_subset_fraction)
-        print(f"Using a subset of the training data: {subset_size} samples ({config.train_data_subset_fraction*100:.1f}%)")
-        # Ensure shuffling happens before subsetting if using datasets library's map/filter
-        # If tokenized_train_data is a simple list or array:
-        # random.shuffle(tokenized_train_data) # Optional: shuffle before taking subset
-        tokenized_train_data = tokenized_train_data.select(range(subset_size)) # If using Hugging Face Dataset
-        # Or for a list: tokenized_train_data = tokenized_train_data[:subset_size]
+        print(
+            f"Using a subset of the training data: {subset_size} samples ({config.train_data_subset_fraction * 100:.1f}%)")
+        train_dataset = torch.utils.data.Subset(train_dataset, range(subset_size))  # Use Subset
     elif config.train_data_subset_fraction >= 1.0:
         print("Using the full training dataset.")
     else:
-        raise ValueError("train_data_subset_fraction must be between 0.0 and 1.0 (or >= 1.0 to use all data)")    
-    
+        raise ValueError("train_data_subset_fraction must be between 0.0 and 1.0 (or >= 1.0 to use all data)")
+
+    # --- DataLoader Creation ---
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
-        mlm=False,  # For Causal Language Modeling (like GPT) shift is done automatically by the DataCollatorForLanguageModeling when you use it with mlm=False
+        mlm=False,
         return_tensors="pt"
     )
 
     train_loader = DataLoader(
-        tokenized_train_data,
+        train_dataset,  # Use the tokenized data
         batch_size=config.batch_size,
-        collate_fn=data_collator,
-        shuffle=True,
+        #collate_fn=data_collator,  # Collator handles final padding within the batch
+        shuffle=False,  # Shuffle for training
         num_workers=config.num_workers,
-        pin_memory=True
+        pin_memory=True,
+        persistent_workers=True  # Maintains worker pools
     )
 
-    val_loader = DataLoader(
-        tokenized_val_data,
-        batch_size=config.batch_size,
-        collate_fn=data_collator,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=True
-    )
+    # Enable CUDA optimizations
+    torch.backends.cudnn.benchmark = True
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
     
     # --- Optimizer ---
     optimizer = optim.AdamW(
         model.parameters(),
-        lr=config.learning_rate, # Initial LR, scheduler will adjust
+        lr=config.learning_rate,  # Initial LR, scheduler will adjust
         weight_decay=config.weight_decay
     )
 
@@ -168,14 +149,12 @@ if __name__ == "__main__":
         model=model,
         optimizer=optimizer,
         train_loader=train_loader,
-        val_loader=val_loader,
-        lr_scheduler_func=get_lr, # Pass the function itself
+        val_loader=None,
         config=config,
         device=device,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        lr_scheduler_type="cosine"
     )
 
     # --- Start Training ---
     trainer.train(config.resume_from_checkpoint)
-
-    

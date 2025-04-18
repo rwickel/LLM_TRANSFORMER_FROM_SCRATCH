@@ -24,48 +24,67 @@ The framework assumes the following project structure:
 │   ├── model.py        # Your existing DecoderLM implementation
 │   └── positional_encoding.py # Your existing positional encoding
 ├── trainer/
-│   ├── __init__.py     # Empty file to make it a package
-│   ├── config.py       # Training configuration dataclass
-│   ├── data_utils.py   # Data loading and preparation functions
-│   ├── trainer.py      # The main Trainer class
-│   └── utils.py        # Helper functions (get_lr)
-└── train.py            # Main script to run training
+│   ├── init.py           # (Package initialization)
+│   ├── config.py         # TrainingConfig dataclass
+│   ├── squad_data.py     # Data loading and preparation
+│   ├── trainer.py        # Trainer class
+│   
+└── train.py              # Training script
 
-
-*Note: `check_device` was moved to `trainer/utils.py` in this structure.*
 
 ## Core Components (`trainer/`)
 
-* **`config.py`**: Defines the `TrainingConfig` dataclass. Modify this file to change hyperparameters like learning rate, batch size, epochs, dataset names, paths, etc.
-* **`data_utils.py`**: Contains functions (`create_dataloaders`) responsible for fetching datasets from Hugging Face Hub, performing train/validation splits, tokenizing the text data using the provided tokenizer, and setting up `DataLoader` instances with a `DataCollatorForLanguageModeling`.
-* **`trainer.py`**: Implements the `Trainer` class which orchestrates the entire training process. It handles:
-    * Epoch and step iteration.
-    * Learning rate scheduling updates.
-    * Mixed precision forward/backward passes using `GradScaler`.
-    * Gradient accumulation.
-    * Optimization steps.
-    * Periodic validation loops.
-    * Saving checkpoints (`latest_checkpoint.pt`, `best_model.pt`).
-    * Resuming from checkpoints.
-* **`utils.py`**: Provides utility functions like the `get_lr` scheduler and the `load_model_from_checkpoint` function for loading previously saved models and tokenizers.
+* **`config.py`:** Defines the `TrainingConfig` dataclass for all training hyperparameters (learning rate, batch size, epochs, paths, etc.).
+* **`squad_data.py`:** Contains functions (`create_dataloaders`) to fetch datasets from the Hugging Face Hub, split them into train/validation sets, tokenize the text, and create `DataLoader` instances using `DataCollatorForLanguageModeling`.
+* **`trainer.py`:** Implements the `Trainer` class, which manages:
+    * Epoch and step iteration
+    * Learning rate scheduling
+    * Mixed precision (AMP)
+    * Gradient accumulation
+    * Optimization steps
+    * Validation loops
+    * Checkpointing (`latest_checkpoint.pt`, `best_model.pt`)
+    * Training resumption
+* **`utils.py`:** Provides utility functions, including the `get_lr` learning rate scheduler and functions to load models and tokenizers.
 
-## Features
+## Training Process
 
-* **Modular Design**: Configuration, data handling, and training logic are separated into distinct files.
-* **Hugging Face Integration**: Leverages `datasets` for loading and `transformers` for tokenization and data collation.
-* **Checkpointing**:
-    * Saves the latest training state (model weights, optimizer state, scaler state, configs) periodically and at the end of epochs to `latest_checkpoint.pt`.
-    * Saves the best model state based on validation loss to `best_model.pt`.
-    * Saves the tokenizer state alongside checkpoints in the save directory.
-* **Resuming**: Training automatically attempts to resume from `latest_checkpoint.pt` if found in the specified save path.
-* **Mixed Precision**: Uses `torch.cuda.amp.GradScaler` and `autocast` for faster training and reduced memory usage on compatible GPUs (configurable via `TrainingConfig.use_mixed_precision`).
-* **LR Scheduling**: Implements cosine decay with linear warmup.
-* **Progress Monitoring**: Uses `tqdm` to display progress bars for training and validation loops.
-* **Validation**: Includes a validation loop to monitor generalization performance and determine the best model checkpoint.
+The `Trainer` class in `trainer/trainer.py` orchestrates the training loop. Here's a breakdown of the key steps involved in each training iteration:
 
-## Prerequisites
+1.  **Batch Retrieval:** The `Trainer` fetches a batch of data from the `train_loader`. This batch typically contains `input_ids`, `attention_mask`, and `labels`.
 
-Ensure you have the necessary libraries installed:
+2.  **Data Transfer:** The input data is moved to the specified device (CPU or GPU).
 
-```bash
-pip install torch transformers datasets tqdm accelerate # accelerate can sometimes help backend operations
+3.  **Forward Pass (with AMP):**
+    * If mixed precision training is enabled (`TrainingConfig.use_mixed_precision`), the forward pass is executed within a `torch.cuda.amp.autocast` context. This allows PyTorch to automatically use lower precision (float16) for compatible operations, leading to faster training and reduced memory consumption.
+    * The model receives the input data and produces `logits` (predicted token probabilities) and `loss`.
+
+4.  **Backward Pass (with Gradient Scaling):**
+    * The calculated `loss` is scaled using `torch.cuda.amp.GradScaler`. This scaling helps prevent underflow issues that can occur with lower precision.
+    * The scaled loss is used to compute gradients via `loss.backward()`.
+
+5.  **Gradient Clipping (Optional):**
+    * If enabled in `TrainingConfig`, gradients are clipped to a maximum norm to prevent exploding gradients.
+
+6.  **Optimization Step:**
+    * The gradients are unscaled using `scaler.unscale_(optimizer)`.
+    * The optimizer updates the model's parameters based on the calculated gradients (`optimizer.step()`).
+
+7.  **Learning Rate Update:**
+    * The learning rate scheduler (`lr_scheduler`) updates the learning rate based on the current training step.
+
+8.  **Gradient Reset:**
+    * The gradients are reset to zero (`optimizer.zero_grad(set_to_none=True)`) to prepare for the next iteration.
+
+9.  **Progress Tracking:**
+    * The current loss and learning rate are logged, and the progress bar is updated.
+
+10. **Validation (Periodic):**
+    * After a certain number of steps (or at the end of each epoch), the model is evaluated on the `val_loader` to assess its generalization performance.
+
+11. **Checkpointing (Periodic):**
+    * The model's state, optimizer state, scheduler state, and training configuration are saved to disk.
+    * The best model (based on validation loss) is also saved.
+
+12. **Training Resumption:**
+    * If training is interrupted, it can be resumed from the latest saved checkpoint.

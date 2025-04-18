@@ -18,7 +18,7 @@ class TransformerConfig:
     intermediate_size: Optional[int] = 4* n_embd
     dropout: float = 0.1
     bias: bool = False
-    shift_labels : bool = False # True for training causal language modeling, False for masked language modeling 
+    shift_labels : bool = True # True for training causal language modeling, False for masked language modeling 
 
     device: Optional[str] = None
 
@@ -50,7 +50,7 @@ def get_model_config(base_config: PretrainedConfig, tokenizer: AutoTokenizer, de
 
     config_data = {
         'block_size': seq_lenght,
-        'vocab_size': tokenizer.vocab_size,
+        'vocab_size': len(tokenizer),
         'n_layer': 4,
         'n_head': 6,
         'n_embd': base_config.hidden_size,

@@ -87,7 +87,6 @@ class DecoderLM(nn.Module):
                 with torch.no_grad():
                      module.weight[module.padding_idx].zero_()
 
-
     def forward(self,
                 input_ids: torch.Tensor,
                 attention_mask: Optional[torch.Tensor] = None, # Keep attention_mask
@@ -126,17 +125,20 @@ class DecoderLM(nn.Module):
             for i in range(1):  # Just look at 1 sample
                 RED = "\033[91m"
                 END = "\033[0m"
-                input = input_ids[i][:20].tolist()
-                target = targets[i][:20].tolist()
-                predicted = preds[i][:20].tolist()
+                input = input_ids[i][:200].tolist()
+                target = targets[i][:200].tolist()
+                predicted = preds[i][:200].tolist()
                 print("Input:   ", input)
                 print("Target:   ", target)
 
                 # Print Predicted with red color where it differs from target
                 print("Predicted:", end=" ")
                 for t, p in zip(target, predicted):
+                    if t==self.config.eos_token_id:
+                        break                    
                     if t == ignore_idx:
                         pass
+
                     if t == p:
                         print(f"{p}", end=" ")
                     else:
