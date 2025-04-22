@@ -15,7 +15,8 @@ from model.model import DecoderLM
 from trainer.config import TrainingConfig
 from trainer.trainer import Trainer
 from trainer.squad_data import SQuADDataset  # Renamed to avoid shadowing
-from trainer.default_data import create_default_data
+from trainer.train_datasets import default_dataset, load_tinystories_dataset
+
 
 def set_seed(seed_value):
     """Sets the seed for reproducibility."""
@@ -35,7 +36,7 @@ if __name__ == "__main__":
     config = TrainingConfig()
     config.device = device  # Update config with actual device
     config.resume_from_checkpoint = True  # Set to True if you want to resume
-    config.dataset_name = "squad"  # Reflecting the change
+    config.dataset_name = "tiny_stories"  # Reflecting the change
     config.tokenizer_name_or_path = 'sentence-transformers/all-MiniLM-L6-v2'
     
     # --- Setup ---
@@ -94,10 +95,10 @@ if __name__ == "__main__":
         f"Model has {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.2f}M trainable parameters.")
 
     # --- Data Preparation --- Simplified Call ---
-    print(f"Preparing SQuAD data using SQuADDataset...")
-
-    #train_dataset = SQuADDataset(tokenizer, config, split="train", max_samples=100)
-    train_dataset = create_default_data(tokenizer, config, split="train", max_samples=100)
+    print(f"Preparing data Dataset...")
+    #train_dataset = SQuADDataset(tokenizer, config, split="train", max_samples=1)
+    train_dataset = load_tinystories_dataset(tokenizer, config, split="train", max_samples= (config.batch_size *780))  # Use the new function
+    #train_dataset = create_default_data(tokenizer, config, split="train", max_samples=100)
     #val_dataset   = SQuADDataset(tokenizer, config, split="validation", max_samples=100) # not used see
 
 
@@ -135,7 +136,6 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-
     
     # --- Optimizer ---
     optimizer = optim.AdamW(

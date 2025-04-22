@@ -16,8 +16,8 @@ class TrainingConfig:
     train_data_subset_fraction: float = 1.0 # between 0 and 1, 1 for using the whole dataset
     vram_log_interval: int =1
     # Training Hyperparameters
-    epochs: int = 100
-    batch_size: int = 64 # Per device batch size
+    epochs: int = 3
+    batch_size: int = 156 # Per device batch size
     gradient_accumulation_steps: int = 1 # Effective batch size = batch_size * accumulation_steps
     learning_rate: float = 5e-3
     weight_decay: float = 0.01
@@ -40,7 +40,7 @@ class TrainingConfig:
     checkpoint_filename_best: str = "best_model.pt"
 
     # Dataloader
-    num_workers: int = max(20,os.cpu_count()) # Dataloader workers   
+    num_workers: int = max(20, os.cpu_count()) # Dataloader workers   
 
     # To be calculated later
     total_train_steps: int = 0

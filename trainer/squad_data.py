@@ -79,11 +79,11 @@ class SQuADDataset(Dataset):
             answer_str = str(answer_text) if answer_text is not None else ""
 
             formatted_text = (
-                f"<BOS>"
+                
                 f"<CTX> {context_str} </CTX>"
                 f"<Q> {question_str} </Q>"
                 f"<A> {answer_str} </A>"
-                f"<EOS>"
+                
             )
             texts.append(formatted_text)
 
@@ -105,32 +105,39 @@ class SQuADDataset(Dataset):
             padding='max_length',
             truncation=True,
             max_length=config.max_seq_length,
-            add_special_tokens=False,
+            add_special_tokens=True,
             return_tensors="pt"
         )
 
         input_ids = tokenized["input_ids"]
         attention_mask = tokenized["attention_mask"]
-        labels = input_ids.clone()
 
-        # Get <A> token ID
-        start_a_token_id = tokenizer.convert_tokens_to_ids("<A>")
-        pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        targets = input_ids.clone()
 
-        # Set ignore_index for everything BEFORE first <A>
-        for i in range(input_ids.size(0)):
-            a_token_pos = (input_ids[i] == start_a_token_id).nonzero(as_tuple=True)
-            if len(a_token_pos[0]) > 0:
-                start = a_token_pos[0].item()
-                labels[i, :start] = ignore_index
-            else:
-                # If no <A> token found, ignore the whole sequence
-                labels[i] = ignore_index
+        targets[:-1] = input_ids[1:]
+        targets[-1] = tokenizer.pad_token_id  # Last token doesn't predict anything
 
-            # Also ignore padding positions
-            labels[i][input_ids[i] == pad_token_id] = ignore_index
+        # Ignore pad tokens in the loss
+        targets[input_ids == tokenizer.pad_token_id] = -100      
 
-        tokenized["labels"] = labels
+        # # Get <A> token ID
+        # start_a_token_id = tokenizer.convert_tokens_to_ids("<A>")
+        # pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+
+        # # Set ignore_index for everything BEFORE first <A>
+        # for i in range(input_ids.size(0)):
+        #     a_token_pos = (input_ids[i] == start_a_token_id).nonzero(as_tuple=True)
+        #     if len(a_token_pos[0]) > 0:
+        #         start = a_token_pos[0].item()
+        #         labels[i, :start] = ignore_index
+        #     else:
+        #         # If no <A> token found, ignore the whole sequence
+        #         labels[i] = ignore_index
+
+        #     # Also ignore padding positions
+        #     labels[i][input_ids[i] == pad_token_id] = ignore_index
+
+        tokenized["labels"] = targets
         return tokenized
 
     

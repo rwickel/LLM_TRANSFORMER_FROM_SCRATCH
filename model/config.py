@@ -52,7 +52,7 @@ def get_model_config(base_config: PretrainedConfig, tokenizer: AutoTokenizer, de
         'block_size': seq_lenght,
         'vocab_size': len(tokenizer),
         'n_layer': 4,
-        'n_head': 6,
+        'n_head': 4,
         'n_embd': base_config.hidden_size,
         'n_kv_head': None,
         'dropout': 0.1,

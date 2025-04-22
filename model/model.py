@@ -122,28 +122,29 @@ class DecoderLM(nn.Module):
         if targets is not None:
 
             ## DEBUG 
-            for i in range(1):  # Just look at 1 sample
-                RED = "\033[91m"
-                END = "\033[0m"
-                input = input_ids[i][:200].tolist()
-                target = targets[i][:200].tolist()
-                predicted = preds[i][:200].tolist()
-                print("Input:   ", input)
-                print("Target:   ", target)
+            if 0:
+                for i in range(1):  # Just look at 1 sample
+                    RED = "\033[91m"
+                    END = "\033[0m"
+                    input = input_ids[i][:200].tolist()
+                    target = targets[i][:200].tolist()
+                    predicted = preds[i][:200].tolist()
+                    print("Input:   ", input)
+                    print("Target:   ", target)
 
-                # Print Predicted with red color where it differs from target
-                print("Predicted:", end=" ")
-                for t, p in zip(target, predicted):
-                    if t==self.config.eos_token_id:
-                        break                    
-                    if t == ignore_idx:
-                        pass
+                    # Print Predicted with red color where it differs from target
+                    print("Predicted:", end=" ")
+                    for t, p in zip(target, predicted):
+                        if t==self.config.eos_token_id:
+                            break                    
+                        if t == ignore_idx:
+                            pass
 
-                    if t == p:
-                        print(f"{p}", end=" ")
-                    else:
-                        print(f"{RED}{p}[{self.config.tokenizer.decode(p)}]{END}", end=" ")
-                print()  # newline
+                        if t == p:
+                            print(f"{p}", end=" ")
+                        else:
+                            print(f"{RED}{p}[{self.config.tokenizer.decode(p)}]{END}", end=" ")
+                    print()  # newline
             ###########
 
             # Shift logits and targets to align predictions with labels
